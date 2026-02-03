@@ -68,6 +68,8 @@ async def get_blocklist(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+from app.services.llm import get_llm_service
+
 @router.post("/analyze", response_model=AnalysisResponse)
 async def analyze_message(
     request: AnalysisRequest, 
@@ -81,8 +83,6 @@ async def analyze_message(
                 parsed = urlparse(request.url)
                 domain = parsed.netloc
                 if domain:
-                    # Check for exact match or subdomain match
-                    # We query all blocked domains to check (optimized in prod with specific queries, but fine here)
                     blocked_list = db.query(models.BlockedDomain).all()
                     for blocked_entry in blocked_list:
                          if domain == blocked_entry.domain or domain.endswith("." + blocked_entry.domain):
@@ -96,40 +96,71 @@ async def analyze_message(
             except:
                 pass
 
+        # 1. INITIAL RULE-BASED ANALYSIS
         # Note: We do NOT persist request.text or request.url
         results = service.analyze_text(request.text)
+        max_score = results["max_risk_score"]
+        explanation = ""
         
-        # Temporal Analysis
+        # 2. TEMPORAL ANALYSIS
         temporal_multiplier, temporal_warning = analyze_temporal_risk(
             request.local_hour, 
             request.day_of_week, 
-            results["max_risk_score"]
+            max_score
         )
+        max_score = min(max_score * temporal_multiplier, 1.0) # Apply temporal factor
         
-        max_score = min(results["max_risk_score"] * temporal_multiplier, 1.0)
-        risk_lvl = get_risk_level(max_score)
-        
-        # Simple rule-based explanation
-        explanation = f"Content analysis indicates {risk_lvl.value.lower().replace('_', ' ')} behavior."
-        if max_score > 0.6:
-            explanation += " High urgency or authority patterns detected."
-            
-        if temporal_warning:
+        if temporal_warning and max_score > 0.3:
             explanation += f" {temporal_warning}"
 
-        # Impersonation Analysis (Module 3)
+        # 3. IMPERSONATION ANALYSIS (Module 3)
         imp_risk_add, imp_warning = analyze_impersonation(request.page_title, request.url)
         max_score = min(max_score + imp_risk_add, 1.0)
         
-        # If impersonation detected, force High Risk
         if imp_risk_add > 0:
-             risk_lvl = RiskLevel.HIGH_RISK
-             explanation = imp_warning # Override explanation with the most critical finding
-        else:
-             risk_lvl = get_risk_level(max_score)
+             explanation += f" {imp_warning}"
+
+        # 4. LLM DEEP DIVE (Granular Risk check)
+        # If the risk is low/ambiguous, ask the LLM for a second opinion to find "Yellow" level risks
+        # This fixes the "0% or 100%" issue by introducing AI nuance.
+        if max_score < 0.6 and request.url:
+             try:
+                 llm = get_llm_service()
+                 # analyze_url returns safety_score (1.0 = SAFE, 0.0 = DANGEROUS)
+                 llm_result = await llm.analyze_url(request.url)
+                 
+                 # Convert safety to risk: Risk = 1.0 - Safety
+                 # e.g. Safety 0.9 (Legit) -> Risk 0.1
+                 # e.g. Safety 0.4 (Suspicious) -> Risk 0.6
+                 llm_risk = 1.0 - llm_result.get("confidence", 1.0)
+                 
+                 # If LLM finds something suspicious (Risk > 0.2), we factor it in
+                 if llm_risk > 0.2:
+                     # Average the scores or take the max? Let's give LLM weight but not full control
+                     # If rule-based missed it (0.0) but LLM sees risk (0.6), boost it.
+                     new_score = max(max_score, llm_risk)
+                     
+                     if new_score > max_score:
+                         max_score = new_score
+                         explanation += " AI heuristics detected suspicious patterns."
+                         # Append signals to detections
+                         for sig in llm_result.get("signals", []):
+                             if sig.get("status") == "DETECTED":
+                                 results["detections"][sig["id"]] = sig["score"]
+             except Exception as e:
+                 print(f"LLM Check failed: {e}")
+
+        # 5. FINAL CALCULATION & EXPLANATION
+        risk_lvl = get_risk_level(max_score)
+        
+        if not explanation:
+            explanation = f"Content analysis indicates {risk_lvl.value.lower().replace('_', ' ')} behavior."
+            if max_score > 0.6:
+                explanation += " High urgency or authority patterns detected."
+            elif max_score > 0.05 and max_score < 0.4:
+                 explanation += " Minor heuristic signals observed (Standard Web Traffic)."
 
         # PERSISTENCE: Save result to DB
-        # Extract domain safely
         domain = "unknown"
         if request.url:
             try:
@@ -156,4 +187,6 @@ async def analyze_message(
             request_id=str(uuid.uuid4())
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
@@ -96,7 +96,7 @@ async def get_activity_log(
         # Determine Status
         if is_blocked or s.risk_score > 0.8:
             status = "BLOCKED"
-        elif s.risk_score > 0.5:
+        elif s.risk_score >= 0.35:  # Lowered from 0.5 to capture Suspicious/Yellow
              status = "WARNED"
         else:
              status = "SAFE"
@@ -120,7 +120,7 @@ async def get_activity_log(
         activity_log.append({
             "id": s.id,
             "domain": s.domain,
-            "timestamp": f"{s.timestamp.isoformat()}Z" if s.timestamp else datetime.utcnow().isoformat() + "Z",
+            "timestamp": s.timestamp.isoformat() if s.timestamp else datetime.now().isoformat(),
             "risk_score": display_score,
             "risk_level": display_level,
             "status": status,
@@ -189,3 +189,23 @@ async def reset_data(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+# Privacy Settings (in-memory storage for demo, can be persisted to DB)
+_privacy_settings = {
+    "pii_masking": True,
+    "retention_days": 30
+}
+
+@router.get("/privacy/settings")
+async def get_privacy_settings():
+    return _privacy_settings
+
+@router.post("/privacy/settings")
+async def update_privacy_settings(pii_masking: bool = None, retention_days: int = None):
+    global _privacy_settings
+    if pii_masking is not None:
+        _privacy_settings["pii_masking"] = pii_masking
+    if retention_days is not None:
+        _privacy_settings["retention_days"] = max(1, min(90, retention_days))
+    return {"status": "success", "settings": _privacy_settings}
+

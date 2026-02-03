@@ -136,6 +136,47 @@ class LlmService:
             "suggestions": ["Verify API Key", "Retry in 60s"]
         }
 
+    async def analyze_url(self, url: str) -> Dict[str, Any]:
+        """
+        Uses Gemini to analyze a URL and predict if it is phishing or safe.
+        Returns a structured dictionary compatible with the frontend.
+        """
+        if not self.api_key:
+            return {"confidence": 0.8, "signals": [{"id": "LLM_MISSING", "status": "SKIPPED", "score": 0.0}]}
+
+        system_prompt = (
+            "You are a Phishing Detection AI. Your job is to analyze the URL below and predict if it is MALICIOUS (Phishing, Scam, Malware) or SAFE.\n"
+            "Analyze the domain structure, TLD, and patterns. Look for typosquatting, high-risk TLDs, and known legitimate domains (e.g., google.com is SAFE).\n\n"
+            f"URL: {url}\n\n"
+            "Return ONLY a raw JSON object (no markdown) with this format:\n"
+            "{\n"
+            "  \"safety_score\": 0.0 to 1.0 (1.0 = VERY SAFE/LEGITIMATE, 0.0 = PHISHING/MALICIOUS),\n"
+            "  \"is_phishing\": true/false,\n"
+            "  \"signals\": [\n"
+            "     { \"id\": \"TYPE_OF_CHECK\", \"status\": \"VALID (if safe) / DETECTED (if risk)\", \"score\": 0.0-1.0 }\n"
+            "  ],\n"
+            "  \"summary\": \"Short explanation\"\n"
+            "}"
+        )
+
+        try:
+            # Simple rotation logic
+            model = genai.GenerativeModel(self.model_names[0])
+            response = model.generate_content(system_prompt)
+            
+            import json
+            text = response.text.strip().replace("```json", "").replace("```", "")
+            data = json.loads(text)
+            
+            return {
+                "confidence": data.get("safety_score", 0.5), # Default to 0.5 if missing key
+                "signals": data.get("signals", [])
+            }
+        except Exception as e:
+            print(f"[LlmService] URL Analysis Failed: {e}")
+            # Fallback to 0.8 (Mostly Safe) on error to avoid blocking legit sites
+            return {"confidence": 0.8, "signals": []}
+
     def _generate_suggestions(self, response_text: str) -> List[str]:
         suggestions = []
         lower_text = response_text.lower()
