@@ -9,7 +9,6 @@
     "tabs"
   ],
   "host_permissions": [
-    "http://127.0.0.1:8000/*",
     "http://127.0.0.1:8002/*"
   ],
   "action": {
@@ -28,12 +27,35 @@
   "content_scripts": [
     {
       "matches": [
-        "https://*.google.com/search*",
-        "https://www.google.com/search*",
-        "https://search.brave.com/*"
+        "<all_urls>"
+      ],
+      "js": ["src/content/dialog-interceptor.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "<all_urls>"
       ],
       "js": ["src/content/content.js"],
       "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": ["src/content/dom-popup-scanner.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://chatgpt.com/*",
+        "*://*.openai.com/*",
+        "*://gemini.google.com/*",
+        "*://claude.ai/*"
+      ],
+      "js": ["src/content/ai-dlp.js"],
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
