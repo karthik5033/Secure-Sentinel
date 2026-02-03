@@ -185,23 +185,25 @@ function addBadge(link, data) {
     document.body.appendChild(popup);
     
     // Find best injection point
-    // 1. Common Search Result headers (h3, h2)
-    // 2. Class-based headers (specific to search engines)
-    // 3. Nested spans within headers (often used by Brave/Google)
+    // 1. Google Search: h3 with class LC20lb
+    // 2. Brave Search: h2 or h3 inside result-header
+    // 3. Common headers (h3, h2)
     // 4. Fallback to the link itself
-    const title = link.querySelector("h3") || 
-                  link.querySelector("h2") || 
-                  link.querySelector("[class*='title']") ||
-                  link.closest("h3") || // Case where the <a> is inside the <h3>
-                  link.closest("h2") ||
-                  link.closest(".g")?.querySelector("h3") || // Google Search
-                  link.closest(".result")?.querySelector(".result-title") || // Generic
-                  link.querySelector("span"); // Use first span in link if exists
+    let titleElement = link.querySelector("h3.LC20lb") || 
+                       link.querySelector("h3") || 
+                       link.querySelector("h2") || 
+                       link.closest(".g")?.querySelector("h3") ||
+                       link.closest(".result")?.querySelector(".result-title") ||
+                       link.querySelector("span");
                   
-    if (title) {
-        // Find the deepest text node or span to append next to
-        const target = title.querySelector("span:last-child") || title;
-        target.appendChild(container);
+    if (titleElement) {
+        // Try to find a text node or a span inside the title to follow
+        const textNode = Array.from(titleElement.childNodes).find(node => node.nodeType === 3 && node.textContent.trim().length > 0);
+        if (textNode) {
+            titleElement.insertBefore(container, textNode.nextSibling);
+        } else {
+            titleElement.appendChild(container);
+        }
     } else {
         // If no title found inside link, try to insert at end of link text
         link.appendChild(container);
@@ -216,8 +218,12 @@ function addBadge(link, data) {
 async function scanLink(link) {
     const url = link.href;
     
-    // Skip if already processed or invalid
-    if (!url || processed.has(url) || url.includes("localhost") || url.includes("127.0.0.1")) {
+    // Skip if already processed, invalid, or is a known safe dev platform
+    if (!url || processed.has(url) || 
+        url.includes("localhost") || 
+        url.includes("127.0.0.1") ||
+        url.includes("github.com") ||
+        url.includes("gitlab.com")) {
         return;
     }
     
@@ -231,15 +237,18 @@ async function scanLink(link) {
         
         if (response && response.success && response.data) {
             addBadge(link, response.data);
-        } else if (!response || !response.success) {
+        } else {
+            console.warn("[SecureSentinel] Scan empty response for:", url, response);
             // Retry once after 2 seconds if message failed
             setTimeout(async () => {
-                const retry = await chrome.runtime.sendMessage({ type: "ANALYZE_URL", url: url });
-                if (retry && retry.success && retry.data) addBadge(link, retry.data);
+                try {
+                    const retry = await chrome.runtime.sendMessage({ type: "ANALYZE_URL", url: url });
+                    if (retry && retry.success && retry.data) addBadge(link, retry.data);
+                } catch(e) { console.error("Retry failed:", e); }
             }, 2000);
         }
     } catch (error) {
-        console.warn("[SecureSentinel] Scan failed:", error.message);
+        console.error("[SecureSentinel] Scan CRITICAL failure:", error);
     }
 }
 
