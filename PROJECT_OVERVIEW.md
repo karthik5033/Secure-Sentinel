@@ -90,73 +90,43 @@ SecureSentinel analyzes every website a user visits and assigns a **Risk Score**
 ```
 DTLshit/
 ├── backend/                    # FastAPI Backend Server
-│   ├── main.py                 # Main API server (736 lines)
-│   ├── app/
-│   │   ├── database.py         # SQLAlchemy database config
-│   │   ├── models.py           # Database models (ScanResult, BlockedDomain, AllowedDomain)
-│   │   ├── routes/             # API route handlers
-│   │   ├── schemas/            # Pydantic schemas
-│   │   └── services/           # Business logic services
-│   ├── models/                 # ML model files
-│   │   ├── best_phishing_model.pth  # PyTorch model (currently unused)
-│   │   ├── model_enhanced.joblib    # Sklearn model (disabled)
-│   │   └── vectorizer_enhanced.joblib
-│   ├── requirements.txt        # Python dependencies
-│   └── sql_app.db             # SQLite database
+│   ├── main.py                 # Main API server
+│   ├── app/                    # App logic & DB
+│   │   ├── sql_app.db          # Active SQLite database
+│   │   └── ...
+│   └── models/                 # ML model files
 │
-├── extension-clean/            # Chrome Extension
-│   ├── manifest.json           # Extension manifest (v3)
-│   ├── popup.html/js           # Extension popup UI
-│   ├── blocked.html/js/css     # Blocked page UI
+├── extension-clean/            # Chrome Extension (v3.0.0)
+│   ├── manifest.json
+│   └── src/
+│
+├── my-app/                     # Next.js Dashboard
 │   ├── src/
-│   │   ├── background/
-│   │   │   └── service-worker.js    # Background service worker
-│   │   └── content/
-│   │       ├── content.js           # Main content script
-│   │       ├── dialog-interceptor.js # Popup detection
-│   │       └── dom-popup-scanner.js  # DOM scanning
-│   └── icons/                  # Extension icons
+│   └── package.json
 │
-├── my-app/                     # Next.js Dashboard (TypeScript)
-│   ├── src/
-│   │   ├── app/                # Next.js 16 app directory
-│   │   └── components/         # React components
-│   ├── package.json            # Node dependencies
-│   └── tailwind.config.js      # Tailwind CSS config
+├── scripts/                    # Project Scripts (Cleaned)
+│   ├── data/                   # Dataset processing scripts
+│   ├── training/               # Model training scripts
+│   ├── setup/                  # Database seeding
+│   ├── maintenance/            # Maintenance utilities
+│   └── legacy/                 # Old scripts
 │
-├── dashboard/                  # Alternative dashboard (legacy?)
+├── docs/                       # Project Documentation
+│   ├── FEATURES.md
+│   ├── DEVELOPER_GUIDE.md
+│   ├── USER_GUIDE.md
+│   └── ...
 │
-├── models/                     # Trained ML models
-│   ├── model_enhanced.joblib
-│   └── vectorizer_enhanced.joblib
+├── dev_tools/                  # Developer tools
+│   └── extension-sync-tool.html
 │
-├── ext_data/                   # Training datasets
-│   └── refined_training_dataset.csv
+├── legacy_backup/              # Backup of old files
 │
-├── data/                       # Additional data files
-│
-├── scripts/                    # Utility scripts
-├── maintenance_scripts/        # Maintenance utilities
-├── notebooks/                  # Jupyter notebooks for analysis
-│
-├── train_phishing_model.py    # PyTorch CNN model training (235 lines)
-├── start_server_v3.py          # Backend server launcher
-├── seed_db.py                  # Database seeding script
-│
-└── Documentation Files:
-    ├── README.md               # Main project documentation
-    ├── FEATURES.md             # Detailed feature explanations
-    ├── DEVELOPER_GUIDE.md      # Developer documentation
-    ├── USER_GUIDE.md           # End-user instructions
-    ├── QUICK_START_AUTO_POPUP.md
-    ├── BLOCKING_FIXED.md
-    └── EXTENSION_DEBUG.md
+├── PROJECT_OVERVIEW.md         # This master document
+├── README.md                   # Quick start guide
+├── run_backend.bat             # Backend launcher
+└── start_server_v3.py          # Backend startup script
 ```
-
----
-
-## 🛡️ The 6 Defense Layers
-
 SecureSentinel uses a sophisticated multi-layered defense approach:
 
 ### 1. 🔍 **Behavioral Baseline**
