@@ -212,21 +212,37 @@ function addBadge(link, data) {
     console.log(`[SecureSentinel] Badge added for: ${link.href} (${Math.round(score * 100)}%)`);
 }
 
+// Cache for API results to avoid duplicate requests
+const resultsCache = new Map();
+
 /**
  * Scan link and add badge with retry logic
  */
 async function scanLink(link) {
     const url = link.href;
     
-    // Skip if already processed, invalid, or is a known safe dev platform
-    if (!url || processed.has(url) || 
+    // Skip if invalid or local/dev
+    if (!url || 
         url.includes("localhost") || 
         url.includes("127.0.0.1") ||
         url.includes("github.com") ||
         url.includes("gitlab.com")) {
         return;
     }
+
+    // Skip if this specific ELEMENT already has a badge
+    if (link.querySelector(".sentinel-badge") || link.getAttribute("data-sentinel-processed")) {
+        return;
+    }
     
+    // Check Cache first
+    if (resultsCache.has(url)) {
+        addBadge(link, resultsCache.get(url));
+        return;
+    }
+    
+    // Mark as processing to prevent parallel fetches for same URL
+    if (processed.has(url)) return;
     processed.add(url);
     
     try {
@@ -236,30 +252,49 @@ async function scanLink(link) {
         });
         
         if (response && response.success && response.data) {
+            // Cache result
+            resultsCache.set(url, response.data);
             addBadge(link, response.data);
         } else {
-            console.warn("[SecureSentinel] Scan empty response for:", url, response);
-            // Retry once after 2 seconds if message failed
+            console.warn("[SecureSentinel] Scan empty response for:", url);
+            processed.delete(url); // Allow retry later
+            
+            // One-time retry
             setTimeout(async () => {
+                if(resultsCache.has(url)) return;
                 try {
                     const retry = await chrome.runtime.sendMessage({ type: "ANALYZE_URL", url: url });
-                    if (retry && retry.success && retry.data) addBadge(link, retry.data);
-                } catch(e) { console.error("Retry failed:", e); }
+                    if (retry && retry.success && retry.data) {
+                        resultsCache.set(url, retry.data);
+                        addBadge(link, retry.data);
+                    }
+                } catch(e) {}
             }, 2000);
         }
     } catch (error) {
-        console.error("[SecureSentinel] Scan CRITICAL failure:", error);
+        console.error("[SecureSentinel] Scan failure:", error);
+        processed.delete(url);
     }
 }
 
 /**
- * Find and scan all links on page
+ * Find and scan links
  */
 function scanAllLinks() {
-    const links = document.querySelectorAll('a[href^="http"]');
+    const isYouTube = window.location.hostname.includes('youtube.com');
+    let links;
+
+    if (isYouTube) {
+        // YouTube specific selectors for main video cards
+        links = document.querySelectorAll('a#video-title, a#video-title-link, a.ytd-video-renderer');
+    } else {
+        // Generic scan for other sites (Search Engines, etc)
+        // Limit to likely content links to avoid nav clutter
+        links = document.querySelectorAll('a[href^="http"]');
+    }
     
     links.forEach((link, index) => {
-        // Spread scans to avoid overhead
+        // Throttle scans
         setTimeout(() => scanLink(link), index * 50);
     });
 }

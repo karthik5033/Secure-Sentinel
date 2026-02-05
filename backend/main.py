@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List, Dict, Any
+from sqlalchemy import func
 import torch
 import torch.nn as nn
 import numpy as np
@@ -17,6 +19,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app.database import get_db
 from app import models
+from app.services.llm import get_llm_service, LlmService
 
 app = FastAPI(
     title="SecureSentinel API",
@@ -89,10 +92,20 @@ class DetectionResponse(BaseModel):
     risk_level: str
     heuristics: dict
 
+class DailyCount(BaseModel):
+    date: str
+    count: int
+
+class GlobalStatsResponse(BaseModel):
+    total_scans: int
+    threats_blocked: int
+    common_patterns: Dict[str, int]
+    recent_trend: List[DailyCount]
+
 from datetime import datetime, timedelta
 
 @app.post("/api/v1/detect", response_model=DetectionResponse)
-async def detect_phishing(request: Request, db: Session = Depends(get_db)):
+async def detect_phishing(request: Request, db: Session = Depends(get_db), service: LlmService = Depends(get_llm_service)):
     try:
         body = await request.json()
         
@@ -173,7 +186,19 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db)):
              "heuristics": {"blocked_by_policy": True}
          }
 
-    # 0.1 Check Whitelist (Common Benign Sites) - Sensitivity Fix
+    # 0.1 Check Whitelist (User Allowed + Common Benign)
+    allowed_entry = db.query(models.AllowedDomain).filter(models.AllowedDomain.domain == clean_host).first()
+    if allowed_entry:
+        return {
+             "url": url,
+             "is_phishing": False,
+             "confidence_score": 0.00,
+             "max_risk_score": 0.0,
+             "risk_level": "Low",
+             "heuristics": {"note": "User Whitelisted"}
+        }
+
+    # 0.2 Check Built-in Whitelist (Common Benign Sites) - Sensitivity Fix
     BENIGN_DOMAINS = {
         "google.com", "youtube.com", "amazon.com", "wikipedia.org", 
         "microsoft.com", "apple.com", "yahoo.com", "bing.com", "whatsapp.com", 
@@ -184,7 +209,24 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db)):
         # Explicitly Whitelisted based on User Feedback
         "imdb.com", "linkedin.com", "indeed.com", "naukri.com", "glassdoor.com",
         "gov.in", "nic.in", "org.in", "edu.in", # Whitelist Gov/Edu TLDs via parent logic
-        "x.com", "twitter.com", "facebook.com", "instagram.com", "reddit.com", "pinterest.com"
+        "x.com", "twitter.com", "facebook.com", "instagram.com", "reddit.com", "pinterest.com",
+        "netflix.com", "hulu.com", "disneyplus.com", "primevideo.com", "moviesanywhere.com", "hotstar.com",
+        # Additional Media / Streaming (verified legit)
+        "plex.tv", "hoopladigital.com", "screenrant.com", "dailymotion.com", "archive.org",
+        "moviesunlimited.com", "rottentomatoes.com", "manoramaonline.com", "zee5.com", "jiocinema.com",
+        "paytm.com", "bookmyshow.com",
+        # Dictionaries & Educational (Critical - Prevent False Positives)
+        "cambridge.org", "merriam-webster.com", "dictionary.com", "ldoceonline.com", 
+        "etymonline.com", "oxfordlearnersdictionaries.com", "thefreedictionary.com",
+        # Tech & Entertainment News
+        "tomsguide.com", "techradar.com", "cnet.com", "theverge.com",
+        # Indian OTT & Services
+        "airtelxstream.in", "sonyliv.com",
+        # Gaming & Misc
+        "steampowered.com", "store.steampowered.com", "chili.com",
+        # Additional Streaming & Media
+        "tubi.tv", "tubitv.com", "justwatch.com", "crunchyroll.com", "funimation.com",
+        "uptodown.com", "apkmirror.com"
     }
     
     # Check if domain or parent domain is in whitelist
@@ -211,14 +253,26 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db)):
         "gamestop", "epicgames", "ea.com", "ubisoft",
         # Movies / Streaming (Strict - Piracy focus)
         "torrent", "free-movies", "123movies", "camrip", "soap2day", "gomovies",
-        "download-free", "watch-free", "erosnow", "moviesanywhere", "hoopla",
-        "netflix", "hulu", "disney", "primevideo",
+        "download-free", "watch-free",
+        "filmyzilla", "vegamovies", "tamilrockers", "123mkv", "mp4moviez", 
+        "bolly4u", "pagalworld", "djpunjab", "downloadhub", "worldfree4u",
+        "khatrimaza", "9xmovies", "full-movie-download", "movie-download-free",
+        # Anime Piracy Sites
+        "cartoonsarea", "gogoanime", "9anime", "kissanime", "animefree",
+        "animepahe", "animekisa", "zoro.to", "aniwatch", "animefreak",
+        "4anime", "animedao", "animesuge", "wcostream",
+        # Removed legitimate services (Netflix, Hulu, etc.) from blacklist
         # Crypto / Telegram (High Risk Source)
         "telegram", "bitcoin", "crypto", "coinswitch", "binance", "coinbase",
         "wallet", "ledger", "trezor", "trustwallet", "metamask", "airdrop",
         # Earning / Free Money / Surveys (High Risk of Scans/Spam)
         "pollpay", "freecash", "rewardy", "swagbucks", "clickworker",
         "earn-money", "make-money", "sidehustle", "cash-app", "money-making",
+        # APK / Mods (High Malware Risk)
+        "mod-apk", "hack-apk", "premium-apk", "paid-apk-free", "crack-apk",
+        # Specific MOD APK Sites (Known Malware Distributors)
+        "apktodo", "liteapks", "modyolo", "modlite", "happymod",
+        "an1.com", "rexdl", "revdl", "apkmody", "apkcombo", "apkdone",
         # Internships / Jobs (Generic risk terms only)
         "job-vacancy", "freshers"  # Removed legitimate portals like Indeed, Naukri, SkillIndia to prevent FPs
     ]
@@ -247,6 +301,38 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db)):
                  "risk_level": "High",
                  "heuristics": {"policy_violation": f"Contains restricted keyword: {kw}"}
              }
+
+    # 0.3 Check Suspicious Keywords (Medium Risk: Gambling, loans, deepfakes)
+    # These return a WARNING (Yellow) instead of a BLOCK (Red)
+    SUSPICIOUS_KEYWORDS = [
+        # Gambling & Betting (High Risk of addiction/loss)
+        "online-casino", "slot-machine", "betting-app", "gambling", 
+        "sports-bet", "poker-online", "roulette", "blackjack",
+        # High Risk Financial
+        "instant-loan", "payday-loan", "quick-cash", "crypto-doubler",
+        # AI / Deepfake (Ethical Risk)
+        "deepfake", "face-swap", "undress-ai", "nudify",
+        # Generic Spam
+        "click-here", "subscribe-now", "winner-claim"
+    ]
+    
+    for kw in SUSPICIOUS_KEYWORDS:
+        if kw in url_lower:
+             # Check if whitelisted first (e.g. news articles about gambling)
+             is_benign = False
+             for domain in BENIGN_DOMAINS:
+                 if domain in url_lower: is_benign = True
+             
+             if not is_benign:
+                 print(f"DEBUG: Suspicious Keyword Match -> {kw}")
+                 return {
+                     "url": url,
+                     "is_phishing": False, # Not definitely phishing
+                     "confidence_score": 0.70, # Medium/High Risk
+                     "max_risk_score": 0.70,
+                     "risk_level": "Medium", # Yellow Badge
+                     "heuristics": {"suspicious_content": f"Contains risk keyword: {kw}"}
+                 }
 
     # 1. Heuristics (Quick Checks)
     heuristics = {
@@ -278,38 +364,100 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db)):
         except (ValueError, AttributeError, IndexError, Exception) as e:
             # Model/Vectorizer mismatch or other critical error
             print(f"⚠️ MODEL INFERENCE FAILED: {repr(e)}")
-            print(f"   Falling back to heuristics-only mode for: {url}")
             model_failed = True
-            # Use heuristics to estimate risk instead of crashing
+            # Use heuristics to estimate risk (fallback)
             heuristic_score = sum([
                 0.3 if heuristics.get("ip_address_host") else 0,
                 0.3 if heuristics.get("too_long") else 0,
                 0.2 if heuristics.get("suspicious_chars") else 0
             ])
-            confidence = min(heuristic_score, 0.7)  # Cap at 70% for heuristics-only
+            confidence = min(heuristic_score, 0.7)
     else:
-        print("DEBUG: Model not loaded during inference.")
-        model_failed = True
+        # No model loaded (Safe Mode)
+        # Use heuristics to estimate risk
+        heuristic_score = sum([
+            0.3 if heuristics.get("ip_address_host") else 0,
+            0.3 if heuristics.get("too_long") else 0,
+            0.2 if heuristics.get("suspicious_chars") else 0
+        ])
+        confidence = heuristic_score
+
+    # 3. ADVANCED ANALYSIS (Baseline "Alive" Factor + LLM Check)
+    # Goal: Ensure scores are rarely 0.0 and capture subtle risks
     
+    # 3a. Heuristic Baseline (The "Alive" Metric)
+    try:
+        import random
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        
+        # Baseline: Subdomain complexity (more dots = slightly riskier/complex)
+        dots = parsed.netloc.count('.')
+        subdomain_risk = max(0, (dots - 1) * 0.02)
+        
+        # Baseline: Query param complexity
+        query_risk = 0.03 if len(parsed.query) > 20 else 0.0
+        
+        # Baseline: Entropy Jitter (0.01 - 0.04)
+        jitter = random.uniform(0.01, 0.04)
+        
+        baseline = subdomain_risk + query_risk + jitter
+        
+        # Apply baseline (floor)
+        confidence = max(confidence, baseline)
+        
+        # Cap baseline influence for otherwise safe sites
+        if confidence < 0.2:
+            confidence = min(confidence, 0.15)
+            
+    except Exception as e:
+        print(f"Baseline calc error: {e}")
+
+    # 3b. LLM Verification (for Ambiguous Sites)
+    # If site is "Low Risk" (<0.6) but has nonzero baseline, ask AI to confirm
+    if confidence < 0.6 and confidence > 0.05:
+        try:
+            print(f"DEBUG: asking LLM to double-check: {url}")
+            llm_result = await service.analyze_url(url)
+            
+            # Risk = 1.0 - Safety
+            llm_risk = 1.0 - llm_result.get("confidence", 1.0)
+            
+            # If LLM is suspicious (> 0.2), boost the score
+            if llm_risk > 0.2:
+                 # Significant boost if LLM is concerned
+                 new_score = max(confidence, llm_risk)
+                 if new_score > confidence:
+                     confidence = new_score
+                     heuristics["ai_flagged"] = True
+                     
+                 # Append LLM signals for debug/explanation
+                 heuristics["ai_signals"] = [s.get("id") for s in llm_result.get("signals", []) if s.get("status") == "DETECTED"]
+        except Exception as e:
+            print(f"LLM Check error: {e}")
+
     # 3. Decision Logic & Sensitivity Adjustment
     # Dampen extremely high scores if not in blocklist to avoid false 100%s
     if confidence > 0.98: confidence = 0.98
     
-    is_phishing = confidence > 0.60 # Increased threshold from 0.50
+    is_phishing = confidence > 0.60 
     
     risk_level = "Low"
     if confidence > 0.95: risk_level = "Critical"
     elif confidence > 0.85: risk_level = "High"
-    elif confidence > 0.60: risk_level = "Medium"
+    elif confidence >= 0.35: risk_level = "Medium" # 0.35 triggers Yellow in Stats
     
     # SAVE TO DB
     try:
+        explanation = "AI & Heuristic Analysis"
+        if heuristics.get("ai_flagged"): explanation = "AI Detected Suspicious Patterns"
+        
         scan_entry = models.ScanResult(
             url=url,
             domain=domain,
             risk_score=float(confidence),
             risk_level=risk_level,
-            explanation="Deep Learning Model Detection"
+            explanation=explanation
         )
         db.add(scan_entry)
         db.commit()
@@ -397,10 +545,18 @@ def block_domain(request: DomainRequest, db: Session = Depends(get_db)):
 def unblock_domain(request: DomainRequest, db: Session = Depends(get_db)):
     try:
         clean_domain = normalize_domain(request.domain)
+        # Remove from blocklist
         db.query(models.BlockedDomain).filter(models.BlockedDomain.domain == clean_domain).delete()
+        
+        # Add to whitelist (to prevent re-flagging by AI)
+        whitelisted = db.query(models.AllowedDomain).filter(models.AllowedDomain.domain == clean_domain).first()
+        if not whitelisted:
+            db.add(models.AllowedDomain(domain=clean_domain))
+        
         db.commit()
-        return {"status": "unblocked", "domain": clean_domain}
+        return {"status": "unblocked_and_whitelisted", "domain": clean_domain}
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 # ===========================
@@ -478,188 +634,55 @@ class ChatRequest(BaseModel):
     context: str = ""
 
 @app.post("/api/v1/chat")
-async def chat_assistant(request: ChatRequest):
+async def chat_assistant(request: ChatRequest, service: LlmService = Depends(get_llm_service)):
     try:
-        msg = request.message.lower()
-        response_text = "I'm Sentinel AI. How can I assist you with your security concerns today?"
-        suggestions = []
-
-        if "analyze" in msg or "scan" in msg:
-            response_text = "I can analyze URLs and text for phishing patterns. Please use the dashboard to run a specific scan."
-            suggestions = ["Scan a suspicious URL", "Check latest threats"]
-        elif "zero-trust" in msg or "zero trust" in msg:
-            response_text = "Zero-Trust Architecture assumes no user or device is trustworthy by default. Sentinel implements this by verifying every URL request against strict blocklists and heuristic models before allowing access."
-            suggestions = ["How does the blocklist work?", "Enable strict mode"]
-        elif "neural" in msg:
-            response_text = "Our Neural Detection module (currently in Safe Mode) uses deep learning to identify semantic threats in text, such as urgency or fear-inducing language in phishing emails."
-        elif "security" in msg:
-            response_text = "Sentinel provides real-time protection against phishing, social engineering, and malicious downloads. We use a hybrid approach of static blocklists and dynamic heuristic analysis."
-
-        return {
-            "response": response_text,
-            "suggestions": suggestions
-        }
-    except Exception as e:
-        print(f"Chat Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/temporal/analyze")
-async def analyze_temporal(request: Request, db: Session = Depends(get_db)):
-    try:
-        data = await request.json()
-        text_content = data.get("text", "")
-        
-        # Temporal Analysis Engine Logic
-        triggers = []
-        text_lower = text_content.lower()
-        
-        # 1. Define Temporal Keywords with Weights
-        TEMPORAL_PATTERNS = {
-            "URGENCY": {
-                "keywords": ["immediately", "urgent", "now", "asap", "hurry", "quick", "expire", "expiring", "deadline", "limited time", "act now", "don't wait", "risk", "warning", "critical"],
-                "weight": 0.25
-            },
-            "FEAR": {
-                "keywords": ["locked", "suspended", "terminated", "blocked", "compromised", "unauthorized", "suspicious", "fraud", "security alert", "breach", "stolen", "hack"],
-                "weight": 0.30
-            },
-            "AUTHORITY": {
-                "keywords": ["verify", "confirm", "update", "required", "must", "mandatory", "compliance", "official", "authorized", "legal", "police"],
-                "weight": 0.20
-            }
-        }
-        
-        total_risk = 0.0
-        
-        # 2. Pattern Matching
-        for category, data in TEMPORAL_PATTERNS.items():
-            for word in data["keywords"]:
-                if word in text_lower:
-                    # Find position for timeline
-                    pos = text_lower.find(word)
-                    score = data["weight"]
-                    
-                    triggers.append({
-                        "word": word,
-                        "category": category,
-                        "score": score,
-                        "position": pos
-                    })
-                    total_risk += score
-
-        # 3. Cap Total Risk
-        total_risk = min(total_risk, 0.99)
-        risk_level = "Low"
-        if total_risk > 0.8: risk_level = "Critical"
-        elif total_risk > 0.5: risk_level = "High"
-        elif total_risk > 0.2: risk_level = "Medium"
-
-        result = {
-            "risk_score": total_risk,
-            "triggers": sorted(triggers, key=lambda x: x['position']), # Sort by occurrence
-            "categories": {cat: {"count": len([t for t in triggers if t['category'] == cat])} for cat in TEMPORAL_PATTERNS},
-            "urchin_tracking_module": "active", # Dummy tracking sign
-            "explanation": f"Detected {len(triggers)} psychological triggers indicating {risk_level} temporal pressure."
-        }
-        
-        # Save to DB for History
-        try:
-            scan_entry = models.ScanResult(
-                url=text_content[:400] + ("..." if len(text_content) > 400 else ""),
-                domain="Temporal Analysis",
-                risk_score=float(total_risk),
-                risk_level=risk_level,
-                explanation=result["explanation"]
-            )
-            db.add(scan_entry)
-            db.commit()
-        except Exception as db_err:
-             print(f"Temporal DB Error: {db_err}")
-
+        # Forward to the real LLM service
+        result = await service.chat_with_context(request.message, request.context)
         return result
     except Exception as e:
-        print(f"Temporal Analysis Error: {e}")
-        return {"max_risk_score": 0, "detections": []}
+        print(f"Chat Error: {e}")
+        # Fallback to hardcoded if AI service is completely broken to avoid 500
+        return {
+            "response": "Terminal Link Unstable. Sentinel is currently in Safe-Mode. How can I help?",
+            "suggestions": ["Check Connectivity", "Retry Command"]
+        }
 
-@app.get("/api/v1/temporal/history")
-def get_temporal_history(limit: int = 10, db: Session = Depends(get_db)):
-    try:
-        # Fetch items that are likely temporal analysis (domain="Temporal Analysis")
-        # Or just return all recent scans mapped correctly
-        logs = db.query(models.ScanResult).filter(models.ScanResult.domain == "Temporal Analysis").order_by(models.ScanResult.timestamp.desc()).limit(limit).all()
-        
-        # Fallback: if no temporal specific, show generic scans?
-        if not logs:
-             logs = db.query(models.ScanResult).order_by(models.ScanResult.timestamp.desc()).limit(limit).all()
-
-        return [
-            {
-                "text": log.url,
-                "riskScore": log.risk_score,
-                "riskLevel": log.risk_level,
-                "detections": [],
-                "urgency_level": "High" if log.risk_level in ["Critical", "High"] else "Low",
-                "explanation": log.explanation,
-                "timestamp": (log.timestamp.isoformat() + "Z") if log.timestamp else ""
-            }
-            for log in logs
-        ]
-    except Exception as e:
-        print(f"History Error: {e}")
-        return []
+# Include Routers
+from app.routes import temporal
+app.include_router(temporal.router)
 
 @app.post("/api/v1/neural/scan")
-async def neural_scan(request: Request):
+async def neural_scan(request: Request, service: LlmService = Depends(get_llm_service)):
     try:
         data = await request.json()
         url = data.get("url")
         if not url:
-             # Default mock if no URL provided (demo mode)
-             return {
-                "confidence": 0.98,
-                "signals": [
-                    {"id": "DOM_STRUCTURE", "status": "VALID", "score": 0.99},
-                    {"id": "SSL_CERTIFICATE", "status": "VALID", "score": 1.0},
-                    {"id": "CONTENT_INTEGRITY", "status": "VALID", "score": 0.98}
-                ]
-             }
-
-        # Real Analysis
-        import requests
-        try:
-            # Add user-agent to prevent blocking
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Sentinel/1.0'}
-            resp = requests.get(url, headers=headers, timeout=5)
-            
-            status = "VALID" if resp.status_code == 200 else "INVALID"
-            has_ssl = url.startswith("https")
-            has_password = "type=\"password\"" in resp.text.lower() or "type='password'" in resp.text.lower()
-            
-            signals = [
-                {"id": "CONNECTION_HANDSHAKE", "status": "VALID" if resp.ok else "FAILED", "score": 1.0 if resp.ok else 0.0},
-                {"id": "SSL_LAYER", "status": "VALID" if has_ssl else "INSECURE", "score": 1.0 if has_ssl else 0.0},
-                {"id": "DOM_LOGIN_NODE", "status": "DETECTED" if has_password else "ABSENT", "score": 0.8}
-            ]
-            
-            confidence = 0.95 if (resp.ok and has_ssl) else 0.45
-            
-            return {
-                "confidence": confidence,
-                "signals": signals
-            }
-            
-        except requests.exceptions.RequestException:
              return {
                 "confidence": 0.0,
-                "signals": [
-                    {"id": "CONNECTION_HANDSHAKE", "status": "UNREACHABLE", "score": 0.0},
-                    {"id": "DNS_RESOLUTION", "status": "FAILED", "score": 0.0}
-                ]
+                "signals": []
              }
+
+        # Use Gemini to analyze the URL
+        try:
+            result = await service.analyze_url(url)
+            return result
+        except Exception as e:
+            print(f"Neural Scan AI Error: {e}")
+            # Fallback to manual if AI fails
+            return {
+                "confidence": 0.5,
+                "signals": [
+                    {"id": "AI_ENGINE", "status": "OFFLINE", "score": 0.0}
+                ]
+            }
 
     except Exception as e:
         print(f"Neural Scan Error: {e}")
         return {"confidence": 0.0, "signals": []}
+
+# ===========================
+# 4. PRIVACY & SETTINGS
+# ===========================
 
 @app.get("/api/v1/dashboard")
 def get_dashboard_stats(db: Session = Depends(get_db)):
@@ -726,6 +749,61 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
             "activity_trend": []
         }
 
+@app.get("/api/v1/stats/summary", response_model=GlobalStatsResponse)
+def get_global_summary(db: Session = Depends(get_db)):
+    try:
+        total_scans = db.query(models.ScanResult).count()
+        threats_blocked = db.query(models.ScanResult).filter(models.ScanResult.risk_level.in_(["High", "Critical"])).count()
+        
+        # Pattern grouping
+        patterns_raw = db.query(models.ScanResult.risk_level, func.count(models.ScanResult.id)).group_by(models.ScanResult.risk_level).all()
+        common_patterns = {str(p[0]): int(p[1]) for p in patterns_raw}
+        
+        # Trend
+        recent_trend = []
+        now = datetime.utcnow()
+        for i in range(6, -1, -1):
+            day_start = now - timedelta(days=i)
+            day_str = day_start.strftime("%Y-%m-%d")
+            start_of_day = datetime(day_start.year, day_start.month, day_start.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            
+            count = db.query(models.ScanResult).filter(
+                models.ScanResult.timestamp >= start_of_day,
+                models.ScanResult.timestamp < end_of_day
+            ).count()
+            recent_trend.append(DailyCount(date=day_str, count=count))
+            
+        return GlobalStatsResponse(
+            total_scans=total_scans,
+            threats_blocked=threats_blocked,
+            common_patterns=common_patterns,
+            recent_trend=recent_trend
+        )
+    except Exception as e:
+        print(f"Stats Summary Error: {e}")
+        return GlobalStatsResponse(total_scans=0, threats_blocked=0, common_patterns={}, recent_trend=[])
+
+# ===========================
+# 5. REAL-TIME SYNC
+# ===========================
+CURRENT_BROWSING_STATE = {
+    "url": "https://google.com",
+    "timestamp": datetime.utcnow()
+}
+
+class UrlUpdate(BaseModel):
+    url: str
+
+@app.post("/api/v1/status/current-url")
+def update_current_url(data: UrlUpdate):
+    CURRENT_BROWSING_STATE["url"] = data.url
+    CURRENT_BROWSING_STATE["timestamp"] = datetime.utcnow()
+    return {"status": "updated"}
+
+@app.get("/api/v1/status/current-url")
+def get_current_url():
+    return CURRENT_BROWSING_STATE
 @app.get("/health")
 def health_check():
     return {"status": "active", "model_loaded": model is not None, "device": str(device)}

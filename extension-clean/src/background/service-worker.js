@@ -94,8 +94,10 @@ function isPermanentlyBlocked(url) {
  * Get user settings
  */
 async function getSettings() {
-    const result = await chrome.storage.local.get('settings');
-    return { ...DEFAULT_SETTINGS, ...result.settings };
+    const result = await chrome.storage.local.get(['settings', 'protectionEnabled']);
+    // Fallback to protectionEnabled if settings.blockingEnabled is not set
+    const protectionEnabled = result.protectionEnabled !== undefined ? result.protectionEnabled : DEFAULT_SETTINGS.blockingEnabled;
+    return { ...DEFAULT_SETTINGS, ...result.settings, blockingEnabled: protectionEnabled };
 }
 
 /**
@@ -124,8 +126,8 @@ chrome.runtime.onInstalled.addListener(() => {
     syncBlocklist(); // Sync blocklist on install
 });
 
-// Sync blocklist every 5 minutes
-setInterval(syncBlocklist, 5 * 60 * 1000);
+// Sync blocklist every 4 seconds for real-time responsiveness
+setInterval(syncBlocklist, 4 * 1000);
 
 // Initial sync
 syncBlocklist();
@@ -142,6 +144,7 @@ async function analyzeURL(url, isMainFrame = false) {
     }
 
     try {
+        console.log(`[SecureSentinel] 🚀 Analyzing: ${url.substring(0, 50)}...`);
         const response = await fetch(`${API_BASE}/detect`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -153,6 +156,7 @@ async function analyzeURL(url, isMainFrame = false) {
         }
 
         const data = await response.json();
+        console.log(`[SecureSentinel] 📉 Result for ${url.substring(0, 30)}: ${Math.round(data.max_risk_score * 100)}%`);
         
         // Cache result
         cache.set(url, {
@@ -160,7 +164,7 @@ async function analyzeURL(url, isMainFrame = false) {
             timestamp: Date.now()
         });
 
-        // Limit cache size to prevent memory leak
+        // Limit cache size
         if (cache.size > MAX_CACHE_SIZE) {
             const firstKey = cache.keys().next().value;
             cache.delete(firstKey);
@@ -176,7 +180,104 @@ async function analyzeURL(url, isMainFrame = false) {
         return {
             max_risk_score: 0,
             text: url,
-            labels: {}
+            labels: { error: { probability: 1.0, top_features: [{word: "BACKEND_OFFLINE", weight: 1.0}] } }
+        };
+    }
+}
+
+/**
+ * Analyze dialog text with temporal analysis
+ */
+async function analyzeDialog(text, dialogType, url) {
+    try {
+        console.log(`[SecureSentinel] 🔔 Analyzing ${dialogType}: ${text.substring(0, 50)}...`);
+        
+        // Try the new dedicated temporal analysis endpoint first
+        try {
+            const temporalResponse = await fetch(`${API_BASE}/temporal/analyze`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                    text: text,
+                    context: dialogType,
+                    url: url
+                })
+            });
+
+            if (temporalResponse.ok) {
+                const temporalData = await temporalResponse.json();
+                console.log(`[SecureSentinel] 📊 Temporal analysis: ${Math.round(temporalData.risk_score * 100)}%, ${temporalData.triggers.length} triggers`);
+                
+                // Update stats
+                await updateStats(url || 'dialog', temporalData.risk_score, false);
+                
+                return {
+                    riskScore: temporalData.risk_score,
+                    triggers: temporalData.triggers,
+                    labels: temporalData.categories,
+                    dialogType: dialogType,
+                    explanation: temporalData.explanation
+                };
+            }
+        } catch (temporalError) {
+            console.warn("[SecureSentinel] Temporal endpoint failed, falling back to detect:", temporalError.message);
+        }
+        
+        // Fallback to the old /detect endpoint
+        const response = await fetch(`${API_BASE}/detect`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: text })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        
+        // Extract trigger words using same logic as temporal service
+        const TRIGGER_PATTERNS = {
+            URGENCY: ["immediately", "urgent", "now", "asap", "hurry", "quick", "expire", "expiring", "deadline", "limited time", "act now", "don't wait"],
+            FEAR: ["locked", "suspended", "terminated", "blocked", "compromised", "unauthorized", "suspicious", "fraud", "security alert", "breach"],
+            AUTHORITY: ["verify", "confirm", "update", "required", "must", "mandatory", "compliance", "official", "authorized"],
+            IMPERSONATION: ["account", "password", "credentials", "login", "security", "bank", "payment", "billing"]
+        };
+        
+        const triggers = [];
+        const lowerText = text.toLowerCase();
+        
+        Object.entries(TRIGGER_PATTERNS).forEach(([category, words]) => {
+            words.forEach(word => {
+                if (lowerText.includes(word)) {
+                    const position = lowerText.indexOf(word);
+                    const score = category === 'URGENCY' ? 0.9 : category === 'FEAR' ? 0.85 : 0.75;
+                    triggers.push({ word, category, score, position });
+                }
+            });
+        });
+        
+        // Sort by position (temporal order)
+        triggers.sort((a, b) => a.position - b.position);
+        
+        console.log(`[SecureSentinel] 📊 Dialog analysis (fallback): ${Math.round(data.max_risk_score * 100)}%, ${triggers.length} triggers`);
+        
+        // Update stats
+        await updateStats(url || 'dialog', data.max_risk_score, false);
+        
+        return {
+            riskScore: data.max_risk_score,
+            triggers: triggers.slice(0, 15),
+            labels: data.labels,
+            dialogType: dialogType
+        };
+    } catch (error) {
+        console.error("[SecureSentinel] Dialog analysis error:", error.message);
+        return {
+            riskScore: 0,
+            triggers: [],
+            labels: {},
+            dialogType: dialogType
         };
     }
 }
@@ -248,6 +349,13 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
         return;
     }
     
+    // NOTIFY BACKEND of current browsing (Fire and Forget)
+    fetch(`${API_BASE}/status/current-url`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url })
+    }).catch(e => {});
+    
     // Check if URL is whitelisted
     if (tempWhitelist.has(url)) {
         console.log("[SecureSentinel] ✅ Whitelisted:", url);
@@ -309,6 +417,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true; 
     }
     
+    if (message.type === "ANALYZE_DIALOG") {
+        // New handler for dialog/notification analysis
+        analyzeDialog(message.text, message.dialogType, message.url)
+            .then(data => sendResponse(data))
+            .catch(err => sendResponse({ riskScore: 0, triggers: [], error: err.message }));
+        return true;
+    }
+    
     if (message.type === "WHITELIST_TEMP") {
         // Add URL to temporary whitelist
         tempWhitelist.add(message.url);
@@ -330,6 +446,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Could send to backend for retraining
         sendResponse({ success: true });
         return false;
+    }
+    
+    
+    if (message.type === "SYNC_BLOCKLIST") {
+        // Force immediate blocklist sync
+        console.log("[SecureSentinel] 🔄 Force syncing blocklist...");
+        syncBlocklist()
+            .then(() => {
+                console.log("[SecureSentinel] ✅ Blocklist synced. Current size:", permanentBlocklist.size);
+                sendResponse({ 
+                    success: true, 
+                    count: permanentBlocklist.size,
+                    domains: Array.from(permanentBlocklist)
+                });
+            })
+            .catch(err => {
+                sendResponse({ success: false, error: err.message });
+            });
+        return true;
     }
     
     if (message.type === "PING") {

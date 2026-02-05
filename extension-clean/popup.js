@@ -57,26 +57,40 @@ function initControls() {
 async function handleScan() {
     const btn = document.getElementById('scanBtn');
     const originalText = btn.textContent;
-    btn.textContent = 'Scanning...';
+    btn.textContent = 'Analyzing...';
     btn.style.opacity = '0.7';
-    btn.style.cursor = 'wait'; // UX improvements
+    btn.style.cursor = 'wait';
 
     try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab) {
-            await chrome.tabs.sendMessage(tab.id, { type: 'FORCE_SCAN' });
-            setTimeout(async () => {
-                await loadStats();
-                await loadActivity();
+            // 1. Analyze in extension (quick check)
+            chrome.runtime.sendMessage({ 
+                type: "ANALYZE_URL", 
+                url: tab.url,
+                isMainFrame: true
+            });
+
+            // 2. Open Detailed AI Report
+            // This satisfies "get details in a page" using the Gemini-powered page
+            const reportUrl = `http://localhost:3000/features/neural-detection?url=${encodeURIComponent(tab.url)}&auto=true`;
+            chrome.tabs.create({ url: reportUrl });
+
+            // Reset UI
+            setTimeout(() => {
                 btn.textContent = originalText;
                 btn.style.opacity = '1';
                 btn.style.cursor = 'pointer';
-            }, 800);
+            }, 1000);
         }
     } catch (error) {
         console.error('Scan failed:', error);
         btn.textContent = 'Error';
-        setTimeout(() => btn.textContent = originalText, 1000);
+        setTimeout(() => {
+            btn.textContent = originalText;
+            btn.style.opacity = '1';
+            btn.style.cursor = 'pointer';
+        }, 1000);
     }
 }
 

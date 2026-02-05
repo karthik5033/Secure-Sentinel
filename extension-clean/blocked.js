@@ -3,7 +3,24 @@ const params = new URLSearchParams(window.location.search);
 const blockedUrl = decodeURIComponent(params.get('url') || '');
 const riskScore = parseFloat(params.get('risk') || '0');
 const isPermanent = params.get('permanent') === 'true';
-const labels = params.get('labels') ? JSON.parse(decodeURIComponent(params.get('labels'))) : {};
+// Safe text decoding
+const safeDecode = (str) => {
+    try {
+        return decodeURIComponent(str).replace(/\+/g, ' ');
+    } catch (e) {
+        return str;
+    }
+};
+
+const labelsParam = params.get('labels');
+let labels = {};
+if (labelsParam && labelsParam !== 'undefined' && labelsParam !== 'null') {
+    try {
+        labels = JSON.parse(safeDecode(labelsParam));
+    } catch (e) {
+        console.error('Failed to parse labels:', e);
+    }
+}
 
 // Display blocked URL
 document.getElementById('blocked-url').textContent = blockedUrl || 'Unknown URL';
@@ -44,7 +61,7 @@ if (isPermanent) {
 const threatTagsContainer = document.getElementById('threat-tags');
 if (labels && Object.keys(labels).length > 0) {
     Object.entries(labels).forEach(([label, data]) => {
-        if (data.probability > 0.5 || isPermanent) {
+        if (data && typeof data === 'object' && (data.probability > 0.5 || isPermanent)) {
             const tag = document.createElement('div');
             tag.className = 'threat-tag';
             tag.textContent = label.charAt(0).toUpperCase() + label.slice(1);
@@ -92,7 +109,20 @@ if (!isPermanent) {
 
 // Button handlers
 document.getElementById('go-back').addEventListener('click', () => {
-    window.history.back();
+    // Try to go back in history first
+    if (window.history.length > 1) {
+        // Check if we can actually go back (not just to blocked.html again)
+        const referrer = document.referrer;
+        if (referrer && !referrer.includes('blocked.html') && !referrer.includes(blockedUrl)) {
+            window.history.back();
+        } else {
+            // Navigate to a safe default page
+            window.location.href = 'https://www.google.com';
+        }
+    } else {
+        // No history, go to Google as safe page
+        window.location.href = 'https://www.google.com';
+    }
 });
 
 document.getElementById('proceed-btn').addEventListener('click', () => {

@@ -68,6 +68,20 @@ TRIGGER_PATTERNS = {
             "earn", "discount", "offer", "deal", "save", "special"
         ],
         "weight": 0.65
+    },
+    "GEOLOCATION": {
+        "patterns": [
+            "region", "location", "country", "area", "zone", "optimized for",
+            "users from", "not available in", "restricted in", "your area"
+        ],
+        "weight": 0.6
+    },
+    "NAVIGATION": {
+        "patterns": [
+            "proceed", "stay", "leave", "go back", "click here", "press", 
+            "enter", "submit", "continue", "redirect", "forward"
+        ],
+        "weight": 0.5
     }
 }
 

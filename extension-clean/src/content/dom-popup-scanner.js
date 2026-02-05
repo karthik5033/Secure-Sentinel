@@ -486,13 +486,15 @@ async function scanForPopups() {
     }
     lastScanTime = now;
 
-    // EXCEPTION: Do not run generic popup/ad scanner on AI platforms
+    // EXCEPTION: Do not run generic popup/ad scanner on AI platforms OR benign media sites
     // These have their own dedicated scanner (ai-dlp.js) and complex UIs that break easily
     const hostname = window.location.hostname;
     if (hostname.includes('chatgpt.com') || 
         hostname.includes('openai.com') || 
         hostname.includes('claude.ai') || 
-        hostname.includes('gemini.google.com')) {
+        hostname.includes('gemini.google.com') ||
+        hostname.includes('youtube.com') ||
+        hostname.includes('google.com')) {
         return;
     }
     

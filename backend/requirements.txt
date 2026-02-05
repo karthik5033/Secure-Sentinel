@@ -5,3 +5,5 @@ joblib
 numpy
 sqlalchemy
 pydantic
+google-generativeai
+python-dotenv
