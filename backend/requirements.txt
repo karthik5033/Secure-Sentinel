@@ -7,3 +7,5 @@ sqlalchemy
 pydantic
 google-generativeai
 python-dotenv
+tldextract
+lightgbm

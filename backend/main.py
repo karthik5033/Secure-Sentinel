@@ -4,14 +4,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any
 from sqlalchemy import func
-import torch
-import torch.nn as nn
 import numpy as np
 import os
 import joblib
 import sys
 import re
 import json
+import lightgbm as lgb
+import tldextract
+import math
+from collections import Counter
+from urllib.parse import urlparse
 
 # Add parent directory to path to access models if needed
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,44 +41,198 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===========================
-# 2. MODEL LOADING (REVERTED TO SKLEARN)
-# ===========================
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKLEARN_MODELS_DIR = os.path.join(BASE_DIR, 'models') # Root/models
-MODEL_PATH = os.path.join(SKLEARN_MODELS_DIR, 'model_enhanced.joblib')
-VECTORIZER_PATH = os.path.join(SKLEARN_MODELS_DIR, 'vectorizer_enhanced.joblib')
+TRUSTED_DOMAINS = {
+    'google.com','googleapis.com','youtube.com','gmail.com','googlemail.com',
+    'microsoft.com','microsoftonline.com','live.com','outlook.com','office.com',
+    'apple.com','icloud.com','me.com',
+    'amazon.com','amazon.in','amazonaws.com',
+    'facebook.com','instagram.com','whatsapp.com','meta.com',
+    'twitter.com','x.com','t.co',
+    'github.com','gitlab.com',
+    'linkedin.com',
+    'netflix.com',
+    'reddit.com',
+    'wikipedia.org','wikimedia.org',
+    'stackoverflow.com',
+    'dropbox.com',
+    'paypal.com',
+    'chase.com','wellsfargo.com','bankofamerica.com','citibank.com',
+    'spotify.com',
+    'github.com',
+    'twitch.tv',
+    'discord.com',
+    'adobe.com',
+    'salesforce.com',
+    'shopify.com',
+    'wordpress.com',
+    'medium.com',
+    'quora.com',
+    'pinterest.com',
+    'tumblr.com',
+    'flickr.com',
+    'vimeo.com',
+    'dailymotion.com',
+    'soundcloud.com',
+    'bandcamp.com',
+    'patreon.com',
+    'substack.com',
+    'mailchimp.com',
+    'hubspot.com',
+    'zoom.us','slack.com','notion.so','figma.com',
+    'cloudflare.com','aws.amazon.com',
+    'yahoo.com','bing.com','duckduckgo.com',
+}
 
-print(f"🔄 Reverting to Old Model: {MODEL_PATH}")
-
-model = None
-vectorizer = None
-
 # ===========================
-# 2. LOAD ML MODELS (ROBUST & SAFE)
+# 2. LOAD ML MODELS (LightGBM)
 # ===========================
-model = None
-vectorizer = None
-MODEL_STATUS = "DISABLED" # Status for Health Check
+LGBM_MODEL = None
+LGBM_FEATURES = None
+OPTIMAL_THRESHOLD = 0.767
+MODEL_STATUS = "DISABLED"
 
-# ===========================
-# 2. LOAD ML MODELS (SAFE MODE)
-# ===========================
-model = None
-vectorizer = None
-MODEL_STATUS = "DISABLED (Code Safety)"
+def load_lgbm_model():
+    global LGBM_MODEL, LGBM_FEATURES, OPTIMAL_THRESHOLD, MODEL_STATUS
+    try:
+        import joblib, json, os
+        model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'phishing_lgbm.joblib')
+        meta_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'model_metadata.json')
+        
+        if os.path.exists(model_path) and os.path.exists(meta_path):
+            LGBM_MODEL = joblib.load(model_path)
+            with open(meta_path) as f:
+                meta = json.load(f)
+            LGBM_FEATURES = meta['features']
+            OPTIMAL_THRESHOLD = meta['optimal_threshold']
+            MODEL_STATUS = f"ACTIVE (LightGBM, threshold={OPTIMAL_THRESHOLD:.3f})"
+            print(f"[ML] LightGBM model loaded. {len(LGBM_FEATURES)} features. Threshold={OPTIMAL_THRESHOLD:.3f}")
+        else:
+            print(f"[ML] Model files not found. Running without ML.")
+    except Exception as e:
+        print(f"[ML] Failed to load model: {e}")
 
-# CRITICAL: Sklearn model is causing Segfaults on load. 
-# We are disabling it completely to ensure backend stability.
-# try:
-#     if os.path.exists(MODEL_PATH) and os.path.exists(VECTORIZER_PATH):
-#         loaded_model = joblib.load(MODEL_PATH) ...
-# except ...
-print("⚠️  AI Model Disabled: Running in STRICT BLOCKLIST MODE.")
+load_lgbm_model()
 
-# Device check irrelevant but kept for compatibility
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"🚀 API Device: {device} (Note: Sklearn runs on CPU)")
+def load_tranco_domains():
+    global TRUSTED_DOMAINS
+    try:
+        import csv, os
+        tranco_path = os.path.join(
+            os.path.dirname(__file__), '..', 'ext_data', 'tranco_10k.csv'
+        )
+        if os.path.exists(tranco_path):
+            with open(tranco_path, newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                count = 0
+                for row in reader:
+                    if len(row) >= 2:
+                        domain = row[1].strip().lower()
+                        if domain:
+                            TRUSTED_DOMAINS.add(domain)
+                            count += 1
+            print(f"[Tranco] Loaded {count} domains. TRUSTED_DOMAINS now has {len(TRUSTED_DOMAINS)} entries.")
+        else:
+            print("[Tranco] tranco_10k.csv not found. Using hardcoded list only.")
+    except Exception as e:
+        print(f"[Tranco] Failed to load: {e}")
+
+load_tranco_domains()
+
+def extract_url_features(url: str) -> dict | None:
+    try:
+        url = str(url).strip()
+        parsed = urlparse(url if url.startswith('http') else 'http://' + url)
+        ext = tldextract.extract(url)
+        
+        domain = ext.domain or ''
+        suffix = ext.suffix or ''
+        subdomain = ext.subdomain or ''
+        registered_domain = f"{domain}.{suffix}" if suffix else domain
+        path = parsed.path or ''
+        query = parsed.query or ''
+        
+        def entropy(s):
+            if not s: return 0.0
+            c = Counter(s)
+            l = len(s)
+            return -sum((v/l) * math.log2(v/l) for v in c.values())
+        
+        known_brands = {
+            'paypal','google','microsoft','apple','amazon','netflix',
+            'facebook','instagram','twitter','linkedin','dropbox',
+            'chase','wellsfargo','bankofamerica','citibank','hsbc',
+            'steam','discord','roblox','ebay','walmart'
+        }
+        suspicious_tlds = {
+            'xyz','top','click','tk','ml','ga','cf','gq','pw',
+            'club','online','site','website','space','live','icu'
+        }
+        
+        brand_in_subdomain = int(any(
+            b in subdomain.lower() for b in known_brands
+            if b != domain.lower()
+        ))
+        has_ip = int(bool(re.match(r'^(\d{1,3}\.){3}\d{1,3}$', registered_domain)))
+        
+        return {
+            'url_length': len(url),
+            'domain_length': len(registered_domain),
+            'subdomain_length': len(subdomain),
+            'path_length': len(path),
+            'query_length': len(query),
+            'num_dots': url.count('.'),
+            'num_hyphens': url.count('-'),
+            'num_underscores': url.count('_'),
+            'num_slashes': url.count('/'),
+            'num_at': url.count('@'),
+            'num_digits': sum(c.isdigit() for c in url),
+            'num_special': sum(c in '!$%^*()+=[]{}|;<>?' for c in url),
+            'digit_ratio': sum(c.isdigit() for c in url) / max(len(url), 1),
+            'letter_ratio': sum(c.isalpha() for c in url) / max(len(url), 1),
+            'url_entropy': entropy(url),
+            'domain_entropy': entropy(registered_domain),
+            'subdomain_depth': len(subdomain.split('.')) if subdomain else 0,
+            'has_ip': has_ip,
+            'uses_https': int(parsed.scheme == 'https'),
+            'suspicious_tld': int(suffix.lower() in suspicious_tlds),
+            'has_port': int(bool(parsed.port)),
+            'has_at_symbol': int('@' in url),
+            'has_double_slash': int('//' in path),
+            'brand_in_subdomain': brand_in_subdomain,
+            'path_depth': path.count('/'),
+            'is_shortened': int(registered_domain.lower() in {
+                'bit.ly','tinyurl.com','t.co','goo.gl','ow.ly',
+                'shorturl.at','tiny.cc','is.gd','buff.ly','rb.gy'
+            }),
+            'num_subdomains': len(subdomain.split('.')) if subdomain else 0,
+            'domain_digit_count': sum(c.isdigit() for c in domain),
+            'has_consecutive_digits': int(bool(re.search(r'\d{4,}', url))),
+            'query_param_count': len(query.split('&')) if query else 0,
+        }
+    except Exception as e:
+        return None
+
+def get_ml_score(url: str) -> float | None:
+    if LGBM_MODEL is None or LGBM_FEATURES is None:
+        return None
+    features = extract_url_features(url)
+    if features is None:
+        return None
+    try:
+        import pandas as pd
+        feature_vector = pd.DataFrame([features])[LGBM_FEATURES]
+        prob = float(LGBM_MODEL.predict_proba(feature_vector)[0][1])
+        return round(prob, 4)
+    except Exception as e:
+        print(f"[ML] Scoring error: {e}")
+        return None
+        
+def get_registered_domain(url: str) -> str:
+    try:
+        ext = tldextract.extract(url)
+        return f"{ext.domain}.{ext.suffix}".lower() if ext.suffix else ext.domain.lower()
+    except:
+        return ""
 
 # ===========================
 # 3. API ENDPOINTS
@@ -246,7 +403,7 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db), servi
     # 0.2 Check Keyword Blacklist (Strict Policy: Adult, Piracy, Games, Crypto, Earning)
     STRICT_KEYWORDS = [
         # Adult
-        "porn", "xxx", "adult", "sex", "nude", "hentai", "cam",
+        "porn", "xxx", "adult", "sex", "nude", "hentai", "livecam", "webcam",
         # Games (Strict: Block all free/download sites)
         "free-games", "crack", "cheat", "hack", "warez", "repack", 
         "crazygames", "y8", "poki", "freetogame", "steamunlocked",
@@ -341,53 +498,45 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db), servi
         "suspicious_chars": "@" in url or "-" in url.split('/')[0] # hyphen in domain
     }
     
-    # 2. Model Inference (Sklearn) - WITH ROBUST ERROR HANDLING
-    confidence = 0.0
-    model_failed = False
+    # 2. Model Inference
+    # Use heuristics to estimate risk (fallback)
+    heuristic_score = sum([
+        0.3 if heuristics.get("ip_address_host") else 0,
+        0.3 if heuristics.get("too_long") else 0,
+        0.2 if heuristics.get("suspicious_chars") else 0
+    ])
     
-    if model and vectorizer:
-        try:
-            # Vectorize
-            features = vectorizer.transform([url])
-            
-            # Predict Probability (Class 1 = Phishing)
-            if hasattr(model, "predict_proba"):
-                probs = model.predict_proba(features)
-                confidence = probs[0][1]
-            else:
-                # Fallback for models without probability
-                pred = model.predict(features)[0]
-                confidence = 1.0 if pred == 1 else 0.0
-                
-            print(f"DEBUG: Sklearn Prediction for {url} -> {confidence}")
-            
-        except (ValueError, AttributeError, IndexError, Exception) as e:
-            # Model/Vectorizer mismatch or other critical error
-            print(f"⚠️ MODEL INFERENCE FAILED: {repr(e)}")
-            model_failed = True
-            # Use heuristics to estimate risk (fallback)
-            heuristic_score = sum([
-                0.3 if heuristics.get("ip_address_host") else 0,
-                0.3 if heuristics.get("too_long") else 0,
-                0.2 if heuristics.get("suspicious_chars") else 0
-            ])
-            confidence = min(heuristic_score, 0.7)
-    else:
-        # No model loaded (Safe Mode)
-        # Use heuristics to estimate risk
-        heuristic_score = sum([
-            0.3 if heuristics.get("ip_address_host") else 0,
-            0.3 if heuristics.get("too_long") else 0,
-            0.2 if heuristics.get("suspicious_chars") else 0
-        ])
-        confidence = heuristic_score
+    confidence = heuristic_score
+    
+    ml_score = get_ml_score(url)
+    if ml_score is not None:
+        registered = get_registered_domain(url)
+        
+        # If registered domain is in trusted list, cap ML score hard at 0.20
+        # This provides headroom so pop-ups stay green/yellow for known good sites
+        if registered in TRUSTED_DOMAINS:
+            ml_score = min(ml_score, 0.20)
+            print(f"[ML] Trusted domain cap applied: {registered} → ml_score capped to {ml_score:.3f}")
+        
+        # Adaptive blending — give ML more weight when it is very confident
+        # If ML says >0.95, it probably knows — give it 90% weight
+        # If ML says 0.5-0.95, blend 70/30
+        # If ML says <0.5, blend 50/50 with heuristics
+        if ml_score >= 0.95:
+            blend_weight = 0.90
+        elif ml_score >= 0.50:
+            blend_weight = 0.70
+        else:
+            blend_weight = 0.50
+        
+        confidence = round(blend_weight * ml_score + (1 - blend_weight) * heuristic_score, 4)
+        print(f"[ML] {url[:60]} → ml={ml_score:.3f} heuristic={heuristic_score:.3f} weight={blend_weight} blended={confidence:.3f}")
 
     # 3. ADVANCED ANALYSIS (Baseline "Alive" Factor + LLM Check)
     # Goal: Ensure scores are rarely 0.0 and capture subtle risks
     
     # 3a. Heuristic Baseline (The "Alive" Metric)
     try:
-        import random
         from urllib.parse import urlparse
         parsed = urlparse(url)
         
@@ -398,10 +547,7 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db), servi
         # Baseline: Query param complexity
         query_risk = 0.03 if len(parsed.query) > 20 else 0.0
         
-        # Baseline: Entropy Jitter (0.01 - 0.04)
-        jitter = random.uniform(0.01, 0.04)
-        
-        baseline = subdomain_risk + query_risk + jitter
+        baseline = subdomain_risk + query_risk
         
         # Apply baseline (floor)
         confidence = max(confidence, baseline)
@@ -440,12 +586,42 @@ async def detect_phishing(request: Request, db: Session = Depends(get_db), servi
     # Dampen extremely high scores if not in blocklist to avoid false 100%s
     if confidence > 0.98: confidence = 0.98
     
+    # Clean domain discount — reduce score for structurally legitimate domains
+    # (reasonable length, no hyphens, common TLD)
+    # This prevents false positives on sites like campus2college.com, icoeca.com
+    import tldextract as _tldext
+    _ext = _tldext.extract(url)
+    _domain = _ext.domain or ''
+    _suffix = _ext.suffix or ''
+    _legitimate_tld = _suffix in {
+        'com','org','edu','net','gov','in','ac.in','co.in','co.uk','org.uk',
+        'info','international','tech','io','me','app','global','network','online'
+    }
+    
+    # More lenient length check for trusted TLDs (.org, .edu, .gov)
+    _min_len = 2 if _suffix in {'org', 'edu', 'gov', 'ac.in'} else 4
+    
+    _clean_domain = (
+        len(_domain) >= _min_len and
+        len(_domain) <= 32 and
+        _domain.count('-') <= 1 and # Allow at most one hyphen (e.g. cti-cert.com)
+        _legitimate_tld
+    )
+    
+    if _clean_domain and confidence < 0.95:
+        # More aggressive reduction (35% off) for clean-looking organizational domains
+        reduction = 0.65 if _suffix in {'org', 'edu', 'gov', 'ac.in'} else 0.70
+        confidence = round(confidence * reduction, 4)
+        print(f"[ML] Clean domain discount applied: {_domain}.{_suffix} → {confidence:.3f} (reduction={reduction})")
+    
     is_phishing = confidence > 0.60 
     
-    risk_level = "Low"
-    if confidence > 0.95: risk_level = "Critical"
-    elif confidence > 0.85: risk_level = "High"
-    elif confidence >= 0.35: risk_level = "Medium" # 0.35 triggers Yellow in Stats
+    if confidence >= 0.75:
+        risk_level = "High"
+    elif confidence >= 0.40:
+        risk_level = "Medium"
+    else:
+        risk_level = "Low"
     
     # SAVE TO DB
     try:
@@ -648,8 +824,8 @@ async def chat_assistant(request: ChatRequest, service: LlmService = Depends(get
         }
 
 # Include Routers
-from app.routes import temporal
-app.include_router(temporal.router)
+# from app.routes import temporal
+# app.include_router(temporal.router)
 
 @app.post("/api/v1/neural/scan")
 async def neural_scan(request: Request, service: LlmService = Depends(get_llm_service)):
@@ -806,7 +982,7 @@ def get_current_url():
     return CURRENT_BROWSING_STATE
 @app.get("/health")
 def health_check():
-    return {"status": "active", "model_loaded": model is not None, "device": str(device)}
+    return {"status": "active", "model_loaded": LGBM_MODEL is not None, "device": "cpu"}
 
 if __name__ == "__main__":
     import uvicorn

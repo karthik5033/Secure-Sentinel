@@ -137,7 +137,7 @@ async function loadActivity() {
         const percentage = Math.round(score * 100);
         
         let riskClass = '';
-        if (score > 0.7) riskClass = 'high';
+        if (score > 0.75) riskClass = 'high';
         
         item.innerHTML = `
             <div class="feed-info">

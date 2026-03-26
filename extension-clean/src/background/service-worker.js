@@ -4,7 +4,7 @@
  */
 
 const API_BASE = "http://127.0.0.1:8002/api/v1";
-console.log("[SecureSentinel] Service Worker v3.0 - Build: 2025-12-30");
+console.log("[SecureSentinel] Service Worker v3.1 - Build: 2025-03-17");
 
 // Cache for analyzed URLs
 const cache = new Map();
@@ -20,7 +20,7 @@ let permanentBlocklist = new Set();
 // Settings
 const DEFAULT_SETTINGS = {
     blockingEnabled: true,
-    blockThreshold: 0.7,  // 70% risk score triggers block
+    blockThreshold: 0.75,  // 75% risk score triggers block
     showWarnings: true
 };
 
@@ -302,16 +302,16 @@ async function updateStats(url, riskScore, isMainFrame) {
         
         // Increment counters
         scansToday++;
-        if (riskScore > 0.5) {
+        if (riskScore >= 0.55) {
             threatsBlocked++;
             // Badge text for threats
             chrome.action.setBadgeText({ text: "!" });
-            chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
+            chrome.action.setBadgeBackgroundColor({ color: riskScore >= 0.75 ? "#ef4444" : "#f59e0b" });
         }
         
         // HISTORY LOGIC:
         // Only log if it's the MAIN PAGE we visited, OR if it's a THREAT found on the page.
-        if (isMainFrame || riskScore > 0.5) {
+        if (isMainFrame || riskScore >= 0.55) {
             // Avoid duplicate consecutive entries
             if (recentScans.length === 0 || recentScans[0].url !== url) {
                 recentScans.unshift({

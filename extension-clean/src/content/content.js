@@ -3,7 +3,7 @@
  * Enhanced with interactive risk popup
  */
 
-console.log("%c[SecureSentinel] Content Script v2.1 Active", "color: #10b981; font-weight: bold");
+console.log("%c[SecureSentinel] Content Script v3.1 Active", "color: #10b981; font-weight: bold");
 
 // Track processed links
 const processed = new Set();
@@ -15,12 +15,15 @@ function createRiskPopup(data, badge) {
     const score = parseFloat(data.max_risk_score) || 0;
     const percentage = Math.round(score * 100);
     
-    // Determine risk level
+    // Determine risk level — 3-tier badge system
+    // >= 0.75 = RED (HIGH — triggers block page)
+    // >= 0.55 = YELLOW (MEDIUM — warning only, no block)
+    // <  0.55 = GREEN (LOW — safe)
     let riskLevel, riskColor;
-    if (score > 0.7) {
+    if (score >= 0.75) {
         riskLevel = "HIGH RISK";
         riskColor = "#ef4444";
-    } else if (score > 0.4) {
+    } else if (score >= 0.55) {
         riskLevel = "MODERATE";
         riskColor = "#f59e0b";
     } else {
@@ -92,7 +95,7 @@ function createRiskPopup(data, badge) {
         </div>
         
         <div style="margin-top: 12px; text-align: center;">
-            <div style="color: #475569; font-size: 9px; font-weight: 500;">ML-Powered Analysis • v2.1</div>
+            <div style="color: #475569; font-size: 9px; font-weight: 500;">ML-Powered Analysis • v3.1</div>
         </div>
     `;
     
@@ -118,10 +121,10 @@ function addBadge(link, data) {
     const score = parseFloat(data.max_risk_score) || 0;
     let color, label;
     
-    if (score > 0.7) {
+    if (score >= 0.75) {
         color = "#ef4444";
         label = "High Risk";
-    } else if (score > 0.4) {
+    } else if (score >= 0.55) {
         color = "#f59e0b";
         label = "Moderate";
     } else {
